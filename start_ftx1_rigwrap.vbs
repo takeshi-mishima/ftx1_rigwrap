@@ -10,8 +10,8 @@ Set fso = CreateObject("Scripting.FileSystemObject")
 currentDir = fso.GetParentFolderName(WScript.ScriptFullName)
 
 ' --- Setting ---
-' Options, e.g. "--listen 4535:follow --listen 4536:opposite --debug" (leave empty for defaults)
-'   defaults: --rigctld 127.0.0.1:4534 --listen 4535:follow --listen 4536:opposite
+' Options, e.g. "--listen 4535:main --listen 4536:sub --debug" (leave empty for defaults)
+'   defaults: --rigctld 127.0.0.1:4534 --listen 4535:main --listen 4536:sub
 '   MODE of --listen PORT:MODE : follow   = side selected on the panel (VS)
 '                                opposite = the other side
 '                                main     = always MAIN

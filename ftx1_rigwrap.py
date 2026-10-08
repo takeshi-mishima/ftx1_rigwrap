@@ -7,7 +7,7 @@ WSJT-X などの rigctld クライアントと rigctld（Hamlib）の間に入�
 を行う。設計は handoff/ftx1-rigwrap-design.md を参照。
 
 使い方:
-  pythonw ftx1_rigwrap.py [--rigctld 127.0.0.1:4534] [--listen 4535:follow --listen 4536:opposite]
+  pythonw ftx1_rigwrap.py [--rigctld 127.0.0.1:4534] [--listen 4535:main --listen 4536:sub]
                           [--bind 127.0.0.1] [--log PATH] [--debug]
   常駐起動は start_ftx1_rigwrap.vbs を使う（README.md 参照）
 """
@@ -23,7 +23,7 @@ import sys
 import threading
 import time
 
-VERSION = "1.9"
+VERSION = "2.0"
 
 MODES = ("follow", "opposite", "main", "sub")
 SIDE_DIGIT = {"Main": "0", "Sub": "1"}
@@ -669,12 +669,12 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="FTX-1 rigctld wrapper %s" % VERSION)
     ap.add_argument("--rigctld", default="127.0.0.1:4534", help="rigctld の HOST:PORT")
     ap.add_argument("--listen", action="append", type=parse_listen, metavar="PORT:MODE",
-                    help="待ち受けポートとモード (follow/opposite/main/sub)。複数指定可")
+                    help="待ち受けポートとモード (follow/opposite/main/sub)。複数指定可 (既定 4535:main 4536:sub)")
     ap.add_argument("--bind", default="127.0.0.1", help="待ち受けアドレス")
     ap.add_argument("--log", default=os.path.join(base_dir(), "ftx1_rigwrap.log"))
     ap.add_argument("--debug", action="store_true", help="受信したコマンドもすべてログに出す")
     a = ap.parse_args(argv)
-    listens = a.listen or [(4535, "follow"), (4536, "opposite")]
+    listens = a.listen or [(4535, "main"), (4536, "sub")]
 
     setup_logging(a.log, a.debug)
     install_excepthooks()
