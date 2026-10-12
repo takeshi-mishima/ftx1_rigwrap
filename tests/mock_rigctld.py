@@ -18,6 +18,7 @@ class Rig:
         self.freq = {"0": 14074000, "1": 7074000}
         self.mode = {"0": "USB", "1": "LSB"}
         self.na = {"0": "0", "1": "0"}
+        self.ag = {"0": "128", "1": "128"}          # AF GAIN
         self.ptt = "0"
         self.vfo_mode = {"0": "USB", "1": "USB"}   # VFO に戻ったときのモード
         self.cat = []          # 無線機に送られた CAT（記録）
@@ -56,6 +57,11 @@ class Rig:
             return "TX%s;" % ("1" if self.ptt == "1" else "0")
         if c in ("FA;", "FB;"):
             return "%s%09d;" % (c[:2], self.freq["0" if c == "FA;" else "1"])
+        if c.startswith("AG") and len(c) == 4:
+            return "AG%s%s;" % (c[2], self.ag[c[2]])
+        if c.startswith("AG") and len(c) == 7:
+            self.ag[c[2]] = c[3:6]
+            return ""
         if c.startswith("NA") and len(c) == 4:
             return "NA%s%s;" % (c[2], self.na[c[2]])
         if c.startswith("NA") and len(c) == 5:

@@ -152,7 +152,7 @@ def main():
     RIG.mode["1"] = "CW"
     c2.q("M PKTUSB -1")
     side_pend = ftx1_rigwrap_ctl()["Sub"]
-    ftx1_rigwrap_ctl()["Sub"] = (side_pend[0], side_pend[1] - 60)
+    ftx1_rigwrap_ctl()["Sub"] = (side_pend[0], side_pend[1] - 60) + side_pend[2:]
     check("期限切れなら F でメモリーのモード CW", c2.q("F 10136000") == ["RPRT 0"]
           and RIG.mode["1"] == "CW")
     RIG.vm["1"] = "11"
@@ -178,6 +178,42 @@ def main():
     check("FM のナローはそのまま", c1.q("F 433000000") == ["RPRT 0"] and RIG.na["0"] == "1")
     RIG.na["0"] = "0"
     RIG.mode["0"] = "USB"
+
+    # --- --data-af-zero：非 DATA → DATA-U/L のときだけ AF GAIN を 0 にする
+    RIG.mode["1"], RIG.ag["0"], RIG.ag["1"] = "LSB", "128", "128"
+    RIG.cat.clear()
+    c2.q("M PKTUSB -1")
+    check("オプションなしでは AF GAIN を触らない", RIG.ag == {"0": "128", "1": "128"}
+          and not any(x.startswith("AG") for x in RIG.cat))
+    _CTL[0].af_zero_data = True
+    RIG.mode["1"] = "LSB"
+    check("非 DATA → DATA-U：SUB の AF GAIN が 0", c2.q("M PKTUSB -1") == ["RPRT 0"]
+          and RIG.ag["1"] == "000")
+    check("MAIN の AF GAIN は不変", RIG.ag["0"] == "128")
+    RIG.ag["1"] = "100"
+    c2.q("M PKTUSB -1")
+    check("すでに DATA のときは触らない（ツマミの値を尊重）", RIG.ag["1"] == "100")
+    c2.q("M CW 0")
+    check("DATA → 非 DATA でも戻さない・触らない", RIG.ag["1"] == "100")
+    RIG.mode["0"] = "USB"
+    check("follow 非 DATA → DATA-L：MAIN の AF GAIN が 0", c1.q("M PKTLSB -1") == ["RPRT 0"]
+          and RIG.ag["0"] == "000")
+    RIG.ag["0"] = "128"
+    RIG.mode["0"] = "USB"
+    c1.q("M USB -1")
+    check("非 DATA → 非 DATA は触らない", RIG.ag["0"] == "128")
+    # メモリー中：保留した M は VFO に戻したときに適用（メモリーのモードが非 DATA のときだけ）
+    RIG.vm["1"], RIG.mode["1"], RIG.ag["1"], RIG.freq["1"] = "11", "CW", "128", 80000000
+    c2.q("M PKTUSB -1")
+    check("メモリー中の M 保留時点では触らない", RIG.ag["1"] == "128")
+    check("F で VFO に戻るとき AF GAIN が 0", c2.q("F 7041000") == ["RPRT 0"]
+          and RIG.mode["1"] == "PKTUSB" and RIG.ag["1"] == "000")
+    RIG.vm["1"], RIG.mode["1"], RIG.ag["1"], RIG.freq["1"] = "11", "PKTUSB", "128", 80000000
+    c2.q("M PKTUSB -1")
+    c2.q("F 7041000")
+    check("メモリーのモードがすでに DATA なら触らない", RIG.ag["1"] == "128")
+    _CTL[0].af_zero_data = False
+    RIG.mode["0"], RIG.mode["1"], RIG.na["0"], RIG.na["1"] = "USB", "USB", "0", "0"
 
     # --- PTT
     RIG.cat.clear()

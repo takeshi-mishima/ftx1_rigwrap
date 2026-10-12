@@ -4,11 +4,12 @@ WSJT-X などの rigctld クライアントと rigctld（Hamlib）の間に入�
   - 制御先を「操作バンド / その反対側 / MAIN 固定 / SUB 固定」に振り分ける
   - F/M の前に、制御先がメモリーチャンネル等なら VFO に戻す
   - DATA-U/DATA-L 設定後にナローが ON になっていたら OFF に戻す
+  - （--data-af-zero 指定時）非 DATA モードから DATA-U/DATA-L に切り替えたら AF GAIN を 0 にする
 を行う。設計は handoff/ftx1-rigwrap-design.md を参照。
 
 使い方:
   pythonw ftx1_rigwrap.py [--rigctld 127.0.0.1:4534] [--listen 4535:main --listen 4536:sub]
-                          [--bind 127.0.0.1] [--log PATH] [--debug]
+                          [--bind 127.0.0.1] [--log PATH] [--debug] [--data-af-zero]
   常駐起動は start_ftx1_rigwrap.vbs を使う（README.md 参照）
 """
 
@@ -23,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "2.0"
+VERSION = "2.1"
 
 MODES = ("follow", "opposite", "main", "sub")
 SIDE_DIGIT = {"Main": "0", "Sub": "1"}
@@ -148,7 +149,8 @@ class Control:
         self.buf = b""
         self._band = None
         self._band_time = 0.0
-        self.pending = {}       # side -> (モード名, 時刻)：メモリー中に保留した M
+        self.pending = {}       # side -> (モード名, 時刻, 保留時点で DATA 系だったか)：メモリー中に保留した M
+        self.af_zero_data = False   # --data-af-zero：非 DATA → DATA-U/L で AF GAIN を 0 にする
 
     # --- 低レベル
     def _connect(self):
@@ -262,8 +264,10 @@ class Control:
             if ans == want:
                 return True, None, ""
             pend = self.pending.pop(side, None)
+            af_zero = False
             if pend and time.monotonic() - pend[1] < PENDING_MODE_SEC:
                 code = MODE_CODE[pend[0]]
+                af_zero = self.af_zero_data and code in ("8", "C") and not pend[2]
                 restore = "MD%s%s;" % (d, code) + ("NA%s0;" % d if code in ("8", "C") else "")
                 note = " 保留モード %s を設定" % pend[0]
             else:
@@ -283,6 +287,8 @@ class Control:
                     log.error("操作バンドが元に戻らなかったため再設定: %s", vs)
                     note += "（復帰を再試行: %s）" % vs
                 self._band, self._band_time = None, 0.0
+            if ans2 == want and af_zero:
+                note += self.af_zero_note(side)
             return ans2 == want, ans, note
 
     @staticmethod
@@ -313,6 +319,23 @@ class Control:
             return int(ans[2:-1])
         except (TypeError, ValueError):
             return None
+
+    # --- AF GAIN
+    def is_data_mode(self, side):
+        """side のモードが DATA-U/DATA-L なら True、そうでなければ False、読めなければ None"""
+        d = SIDE_DIGIT[side]
+        md = self.raw("MD%s;" % d)
+        if not (md and len(md) == 5 and md.startswith("MD" + d)):
+            return None
+        return md[3] in ("8", "C")
+
+    def af_zero(self, side):
+        """AF GAIN を 0 にして読み戻して確認する"""
+        d = SIDE_DIGIT[side]
+        return self.raw("AG%s000;AG%s;" % (d, d)) == "AG%s000;" % d
+
+    def af_zero_note(self, side):
+        return " AF GAIN を 0 (%s)" % ("OK" if self.af_zero(side) else "失敗")
 
     # --- ナロー OFF
     def narrow_off(self, side):
@@ -509,7 +532,9 @@ class Handler(socketserver.BaseRequestHandler):
             d = SIDE_DIGIT[side]
             mode = args[0].upper()
             if self.ctl.raw("VM%s;" % d) != "VM%s00;" % d and mode in MODE_CODE:
-                self.ctl.pending[side] = (mode, time.monotonic())
+                # 保留時点（メモリーのモード）が DATA 系かを覚えておく（--data-af-zero 用）
+                was_data = self.ctl.af_zero_data and self.ctl.is_data_mode(side) is not False
+                self.ctl.pending[side] = (mode, time.monotonic(), was_data)
                 log.info("[%s] %s: メモリー中のため %s を保留 (%s)", self.tag, side, mode,
                          cmd.raw.strip())
                 self.to_client("RPRT 0\n")
@@ -545,12 +570,21 @@ class Handler(socketserver.BaseRequestHandler):
             log.info("[%s] %s: %s → VFO (%s の前) %s", self.tag, side, before,
                      cmd.raw.strip(), note)
 
+        # --data-af-zero：実行前のモードが非 DATA のときだけ、DATA 設定後に AF GAIN を 0 にする
+        to_data = (cmd.name == "set_mode" and bool(args) and args[0].upper() in NARROW_FIX_MODES)
+        af_zero = False
+        if to_data and self.ctl.af_zero_data:
+            af_zero = self.ctl.is_data_mode(side) is False
+
         lines, rc = self.ctl.command(cmd.build(vfo=side, args=args, prefix="+"))
-        if rc == 0 and cmd.name == "set_mode" and args and args[0].upper() in NARROW_FIX_MODES:
+        if rc == 0 and to_data:
             ok2, changed = self.ctl.narrow_off(side)
             if changed:
                 log.info("[%s] %s: %s 後のナローを OFF (%s)", self.tag, side, args[0],
                          "OK" if ok2 else "失敗")
+            if af_zero:
+                log.info("[%s] %s: 非 DATA → %s のため%s", self.tag, side, args[0],
+                         self.ctl.af_zero_note(side))
         if rc == 0 and cmd.name == "set_freq":
             ok2, changed = self.ctl.narrow_off_if_data(side)
             if changed:
@@ -672,6 +706,9 @@ def main(argv=None):
                     help="待ち受けポートとモード (follow/opposite/main/sub)。複数指定可 (既定 4535:main 4536:sub)")
     ap.add_argument("--bind", default="127.0.0.1", help="待ち受けアドレス")
     ap.add_argument("--log", default=os.path.join(base_dir(), "ftx1_rigwrap.log"))
+    ap.add_argument("--data-af-zero", action="store_true",
+                    help="非 DATA モードから DATA-U/DATA-L に切り替えたとき、その側の AF GAIN を 0 にする"
+                         "（DATA の受信音をスピーカーから出さない。元には戻さない）")
     ap.add_argument("--debug", action="store_true", help="受信したコマンドもすべてログに出す")
     a = ap.parse_args(argv)
     listens = a.listen or [(4535, "main"), (4536, "sub")]
@@ -680,7 +717,9 @@ def main(argv=None):
     install_excepthooks()
     host, port = parse_hostport(a.rigctld)
     control = Control(host, port)
-    log.info("ftx1_rigwrap %s 起動 rigctld=%s:%d", VERSION, host, port)
+    control.af_zero_data = a.data_af_zero
+    log.info("ftx1_rigwrap %s 起動 rigctld=%s:%d%s", VERSION, host, port,
+             " data-af-zero" if a.data_af_zero else "")
 
     servers = []
     for lport, mode in listens:
