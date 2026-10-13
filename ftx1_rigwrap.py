@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "2.1"
+VERSION = "2.2"
 
 MODES = ("follow", "opposite", "main", "sub")
 SIDE_DIGIT = {"Main": "0", "Sub": "1"}
@@ -376,6 +376,9 @@ class Handler(socketserver.BaseRequestHandler):
 
     # --- 出力
     def to_client(self, data):
+        if self.server.debug:      # 調査用：クライアントへ返した内容も記録する
+            log.debug("[%s] > %s", self.tag,
+                      (data if isinstance(data, str) else data.decode("ascii", "replace")).strip().replace("\n", " | "))
         with self.wlock:
             self.request.sendall(data.encode("ascii") if isinstance(data, str) else data)
 
@@ -488,6 +491,15 @@ class Handler(socketserver.BaseRequestHandler):
             if n == "set_ptt":
                 self.hook_ptt(cmd)
                 return None
+            # 非操作側で無視した送信要求（T 1）のあいだは、PTT の読み出し（t）に「送信中」と返す。
+            # 実際には送信していないが、WSJT-X が自分の送信状態と食い違って
+            # 送信後の周波数復帰（Fake It）をしなくなるのを防ぐ
+            if n == "get_ptt" and not cmd.prefix and not cmd.args and getattr(self.server, "fake_ptt", False):
+                band = self.ctl.op_band(fresh=True)
+                if band is not None and self.target(band=band) != band:
+                    self.to_client("1\n")
+                    return None
+                self.server.fake_ptt = False      # 担当側が操作バンドになったら本物の応答に戻す
             if n == "set_split_vfo":
                 if cmd.args[:1] == ["0"]:
                     self.to_client("RPRT 0\n")
@@ -602,12 +614,16 @@ class Handler(socketserver.BaseRequestHandler):
             self.to_client("RPRT %d\n" % RIG_EIO)
             return
         if side == band:
+            self.server.fake_ptt = False
             lines, rc = self.ctl.command(cmd.build(vfo=side, prefix="+"))
             self.reply_rc(cmd, rc, lines)
             return
         # 操作バンドでない側の送信要求は実行せずに成功を返す（WSJT-X をエラーにしない）
         if cmd.args[:1] != ["0"]:
             log.info("[%s] 非操作バンド側 (%s) の送信要求を無視: %s", self.tag, side, cmd.raw.strip())
+            self.server.fake_ptt = True
+        else:
+            self.server.fake_ptt = False
         self.to_client("RPRT 0\n")
 
 

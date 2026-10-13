@@ -222,6 +222,13 @@ def main():
     check("TX は送られていない", not any(x.startswith("TX") for x in RIG.cat))
     check("main T 1（操作バンド）→ 実行", c3.q("T 1") == ["RPRT 0"] and RIG.ptt == "1")
     check("follow T 0 パススルー", c1.q("T 0") == ["RPRT 0"] and RIG.ptt == "0")
+    # 無視した T 1 のあいだ、t は「送信中」（WSJT-X の Fake It が周波数を戻すため）
+    check("opposite 無視前の t は本物（0）", c2.q("t") == ["0"])
+    check("opposite T 1（無視）", c2.q("T 1") == ["RPRT 0"] and RIG.ptt == "0")
+    check("opposite 無視中の t は 1", c2.q("t") == ["1"])
+    check("follow の t は影響を受けない", c1.q("t") == ["0"])
+    check("opposite T 0 → RPRT 0", c2.q("T 0") == ["RPRT 0"])
+    check("opposite T 0 後の t は本物（0）", c2.q("t") == ["0"])
 
     # --- 拒否・無視
     RIG.cat.clear()
