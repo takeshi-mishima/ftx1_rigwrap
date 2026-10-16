@@ -72,6 +72,9 @@ class Rig:
 
 RIG = Rig()
 
+# W-FM の側への m が rigctld に届いた回数（実機の Hamlib は -8 を返して rig を閉じる）
+WFM_M_HITS = [0]
+
 # rigctld の \chk_vfo は、直前にコマンドを処理した接続の vfo_opt を返す（Hamlib の実際の動作）
 LAST_VFO_OPT = [False]
 # rigctld は起動後に一度でも chk_vfo を受けると dump_state の最後に "done" を出す（Hamlib の実際の動作）
@@ -124,7 +127,11 @@ class H(socketserver.StreamRequestHandler):
                             RIG.freq[sd] = int(float(args[0]))
                         # メモリー中は拒否されるが RPRT 0（実機と同じ）
                     elif cmd == "m":
-                        out = [RIG.mode[sd], "3000"]
+                        if RIG.mode[sd] == "WFM":
+                            WFM_M_HITS[0] += 1
+                            rc = -8
+                        else:
+                            out = [RIG.mode[sd], "3000"]
                     elif cmd == "M":
                         RIG.cat.append("MD%s:%s;" % (sd, args[0]))
                         RIG.mode[sd] = args[0]

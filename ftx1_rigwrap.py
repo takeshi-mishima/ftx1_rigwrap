@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "2.2"
+VERSION = "2.3"
 
 MODES = ("follow", "opposite", "main", "sub")
 SIDE_DIGIT = {"Main": "0", "Sub": "1"}
@@ -329,6 +329,14 @@ class Control:
             return None
         return md[3] in ("8", "C")
 
+    def is_wfm(self, side):
+        """side のモードが W-FM（MD の値が 0）なら True、そうでなければ False、読めなければ None"""
+        d = SIDE_DIGIT[side]
+        md = self.raw("MD%s;" % d)
+        if not (md and len(md) == 5 and md.startswith("MD" + d)):
+            return None
+        return md[3] == "0"
+
     def af_zero(self, side):
         """AF GAIN を 0 にして読み戻して確認する"""
         d = SIDE_DIGIT[side]
@@ -370,6 +378,7 @@ class Handler(socketserver.BaseRequestHandler):
         self.ctl = self.server.control
         self.routed = self.mode != "follow"
         self.client_vfo_mode = False   # follow でクライアント自身が set_vfo_opt 1 した
+        self.wfm_seen = set()          # W-FM と答えた側（ログを1回だけ出すため）
         self.wlock = threading.Lock()
         self.tag = "%s:%d" % (self.mode, self.server.server_address[1])
         self.up = None
@@ -483,6 +492,10 @@ class Handler(socketserver.BaseRequestHandler):
             self.to_client(("ChkVFO: %d\n" if cmd.prefix else "%d\n") % v)
             return None
 
+        # m：対象側が W-FM のときは rigctld に渡さない（hook_get_mode）
+        if n == "get_mode" and self.hook_get_mode(cmd):
+            return None
+
         if self.routed:
             if n in ("set_vfo", "set_vfo_opt"):
                 log.info("[%s] %s を無視: %s", self.tag, n, cmd.raw.strip())
@@ -523,6 +536,32 @@ class Handler(socketserver.BaseRequestHandler):
         if n == "set_vfo_opt":
             self.client_vfo_mode = cmd.args[:1] == ["1"]
         return cmd.build()
+
+    # --- m
+    def hook_get_mode(self, cmd):
+        """m：対象側が W-FM（MD の値が 0）のときは rigctld に渡さず、ラッパーが WFM と答える。
+        FTX-1 は W-FM を MD{d}0; と返し、Hamlib はこれを解釈できず -8 を返して rig を閉じる。
+        毎秒ポーリングするクライアントが複数いると、閉じて開き直す間に競合して rigctld が終了する。
+        戻り値：応答済みなら True"""
+        if self.routed:
+            side = self.target(fresh=False)
+        elif self.client_vfo_mode and cmd.args:
+            side = cmd.args[0]
+        else:
+            side = self.ctl.op_band()
+        if side not in SIDE_DIGIT:
+            return False
+        if not self.ctl.is_wfm(side):
+            self.wfm_seen.discard(side)
+            return False
+        if side not in self.wfm_seen:
+            self.wfm_seen.add(side)
+            log.info("[%s] %s: W-FM のため m を rigctld に渡さず WFM と答える", self.tag, side)
+        if cmd.prefix:
+            self.to_client("RPRT %d\n" % RIG_ENAVAIL)
+        else:
+            self.to_client("WFM\n0\n")
+        return True
 
     # --- F / M
     def hook_freq_mode(self, cmd):

@@ -262,6 +262,26 @@ def main():
           and RIG.freq["0"] == 14075000)
     check("ずれを検出して接続し直した", "応答がずれている" in open(log, encoding="utf-8").read())
 
+    # --- W-FM（Ver.2.3）：m を rigctld に渡さない（Hamlib は MD?0; で -8 を返して rig を閉じる）
+    RIG.vs, RIG.vm = "0", {"0": "00", "1": "00"}
+    RIG.mode["0"], RIG.mode["1"] = "USB", "WFM"
+    time.sleep(0.6)  # 操作バンドのキャッシュ切れ
+    mock_rigctld.WFM_M_HITS[0] = 0
+    check("opposite m（SUB が W-FM）→ WFM / 0", c2.q("m", 2) == ["WFM", "0"])
+    check("main m（MAIN は W-FM でない）は rigctld の答え", c3.q("m", 2) == ["USB", "3000"])
+    check("follow m（操作バンド MAIN は W-FM でない）は rigctld の答え", c1.q("m", 2) == ["USB", "3000"])
+    check("follow vfo_opt 後 m Sub（W-FM）→ WFM / 0", c4.q("m Sub", 2) == ["WFM", "0"])
+    check("+m（W-FM）→ RPRT -11（rigctld に渡さない）", c2.q("+m") == ["RPRT -11"])
+    check("W-FM の m が rigctld に届いていない", mock_rigctld.WFM_M_HITS[0] == 0)
+    RIG.mode["1"] = "LSB"
+    check("W-FM でなくなれば今までどおり", c2.q("m", 2) == ["LSB", "3000"])
+    RIG.mode["0"] = "WFM"
+    time.sleep(0.6)
+    check("follow m（操作バンド MAIN が W-FM）→ WFM / 0", c1.q("m", 2) == ["WFM", "0"])
+    check("main m（MAIN が W-FM）→ WFM / 0", c3.q("m", 2) == ["WFM", "0"])
+    check("W-FM の m が rigctld に届いていない（MAIN も）", mock_rigctld.WFM_M_HITS[0] == 0)
+    RIG.mode["0"] = "USB"
+
     print(open(log, encoding="utf-8").read())
     print("FAILS:", fails)
     return fails
