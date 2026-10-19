@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "2.3"
+VERSION = "2.4"
 
 MODES = ("follow", "opposite", "main", "sub")
 SIDE_DIGIT = {"Main": "0", "Sub": "1"}
@@ -86,6 +86,7 @@ RIG_ETIMEOUT = -5
 RIG_EINVAL = -1
 RIG_ENAVAIL = -11
 RIG_ERJCTED = -9
+PTT_CACHE_SEC = 1.5     # Hamlib の PTT キャッシュ（1秒）が古い可能性のある期間
 
 log = logging.getLogger("ftx1_rigwrap")
 
@@ -151,6 +152,7 @@ class Control:
         self._band_time = 0.0
         self.pending = {}       # side -> (モード名, 時刻, 保留時点で DATA 系だったか)：メモリー中に保留した M
         self.af_zero_data = False   # --data-af-zero：非 DATA → DATA-U/L で AF GAIN を 0 にする
+        self.ptt_raw_time = 0.0     # 直近に PTT を send_raw で切り替えた時刻（Hamlib の PTT キャッシュが古い間、t を直接読む）
 
     # --- 低レベル
     def _connect(self):
@@ -233,6 +235,25 @@ class Control:
             if ln.startswith("Send raw answer:"):
                 return ln.split(":", 1)[1].strip()
         return None
+
+    # --- PTT（send_raw）
+    def set_ptt_raw(self, on):
+        """Hamlib の set_ptt は TX1; を送ったあと約120ms待ち、さらに TX; を読み返すため
+        約185ms（送信OFFは約250ms）かかる。TX{on};TX; を1回の send_raw で送り、
+        TX; の応答で確認する（約65ms）。戻り値：(成功か, 応答)"""
+        with self.lock:
+            ans = self.raw("TX%s;TX;" % ("1" if on else "0"))
+            self.ptt_raw_time = time.monotonic()
+        if ans is None:
+            return False, None
+        return (ans != "TX0;") if on else (ans == "TX0;"), ans
+
+    def get_ptt_raw(self):
+        """TX; を直接読む。戻り値："1" / "0" / None（読めない）"""
+        ans = self.raw("TX;")
+        if ans is None or not ans.startswith("TX") or len(ans) < 4:
+            return None
+        return "0" if ans[2] == "0" else "1"
 
     # --- 操作バンド
     def op_band(self, fresh=False, ttl=0.5):
@@ -513,6 +534,14 @@ class Handler(socketserver.BaseRequestHandler):
                     self.to_client("1\n")
                     return None
                 self.server.fake_ptt = False      # 担当側が操作バンドになったら本物の応答に戻す
+            # send_raw で PTT を切り替えた直後は、Hamlib の PTT キャッシュ（1秒）が古いままなので、
+            # t は TX; を直接読んで答える（古い「受信中」を返すと WSJT-X が送信状態と食い違う）
+            if (n == "get_ptt" and not cmd.prefix and not cmd.args
+                    and time.monotonic() - self.ctl.ptt_raw_time < PTT_CACHE_SEC):
+                v = self.ctl.get_ptt_raw()
+                if v is not None:
+                    self.to_client(v + "\n")
+                    return None
             if n == "set_split_vfo":
                 if cmd.args[:1] == ["0"]:
                     self.to_client("RPRT 0\n")
@@ -646,6 +675,23 @@ class Handler(socketserver.BaseRequestHandler):
         self.reply_rc(cmd, rc, lines)
 
     # --- T（routed のみ）
+    def ptt_raw(self, cmd, on):
+        """操作バンド側の T 0 / T 1 を send_raw（TX0;TX; / TX1;TX;）で実行する。
+        失敗時は RPRT -9（無線機が応答したが期待と違う）または -6（通信できない）"""
+        t0 = time.monotonic()
+        ok, ans = self.ctl.set_ptt_raw(on)
+        if not ok and on and ans is None:
+            self.ctl.set_ptt_raw(False)      # 状態不明のまま送信になっていないように止めておく
+        if not ok and not on:
+            ok, ans = self.ctl.set_ptt_raw(False)      # 送信を止められないのは危険なので1回だけやり直す
+        rc = 0 if ok else (RIG_ERJCTED if ans is not None else RIG_EIO)
+        if rc != 0:
+            log.warning("[%s] PTT %s に失敗 (応答 %r) -> RPRT %d", self.tag, "ON" if on else "OFF", ans, rc)
+        else:
+            log.debug("[%s] PTT %s send_raw %.0fms", self.tag, "ON" if on else "OFF",
+                      (time.monotonic() - t0) * 1000)
+        self.reply_rc(cmd, rc, ["set_ptt: %d" % (1 if on else 0), "RPRT %d" % rc])
+
     def hook_ptt(self, cmd):
         band = self.ctl.op_band(fresh=True)
         side = self.target(band=band)
@@ -654,6 +700,9 @@ class Handler(socketserver.BaseRequestHandler):
             return
         if side == band:
             self.server.fake_ptt = False
+            if cmd.args[:1] in (["0"], ["1"]):
+                self.ptt_raw(cmd, cmd.args[0] == "1")
+                return
             lines, rc = self.ctl.command(cmd.build(vfo=side, prefix="+"))
             self.reply_rc(cmd, rc, lines)
             return

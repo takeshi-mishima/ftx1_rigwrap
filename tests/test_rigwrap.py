@@ -220,7 +220,17 @@ def main():
     check("opposite T 1 → RPRT 0（無視）", c2.q("T 1") == ["RPRT 0"])
     check("opposite T 0 → RPRT 0（送らない）", c2.q("T 0") == ["RPRT 0"])
     check("TX は送られていない", not any(x.startswith("TX") for x in RIG.cat))
+    RIG.cat.clear()
+    RIG.ptt_cache, RIG.ptt_cache_time = "0", time.time()      # Hamlib の PTT キャッシュが「受信中」で新しい状態
     check("main T 1（操作バンド）→ 実行", c3.q("T 1") == ["RPRT 0"] and RIG.ptt == "1")
+    check("T 1 は send_raw（TX1;TX;）で実行", [x for x in RIG.cat if x.startswith("TX")] == ["TX1;", "TX;"])
+    check("T 1 直後の t は本物（Hamlib のキャッシュが古くても 1）", c3.q("t") == ["1"])
+    RIG.cat.clear()
+    RIG.ptt_cache, RIG.ptt_cache_time = "1", time.time()      # 同様に「送信中」で新しい状態
+    check("main T 0（操作バンド）→ 実行", c3.q("T 0") == ["RPRT 0"] and RIG.ptt == "0" and [x for x in RIG.cat if x.startswith("TX")] == ["TX0;", "TX;"])
+    check("T 0 直後の t は本物（0）", c3.q("t") == ["0"])
+    check("+T 1 は拡張応答", c3.q("+T 1", 2) == ["set_ptt: 1", "RPRT 0"] and RIG.ptt == "1")
+    check("+T 0 は拡張応答", c3.q("+T 0", 2) == ["set_ptt: 0", "RPRT 0"] and RIG.ptt == "0")
     check("follow T 0 パススルー", c1.q("T 0") == ["RPRT 0"] and RIG.ptt == "0")
     # 無視した T 1 のあいだ、t は「送信中」（WSJT-X の Fake It が周波数を戻すため）
     check("opposite 無視前の t は本物（0）", c2.q("t") == ["0"])

@@ -1,6 +1,7 @@
 """テスト用の簡易 rigctld + FTX-1 エミュレータ（実機の動きのうち、ラッパーに関係する部分だけ）"""
 import socketserver
 import threading
+import time
 
 
 CODE = {"0": "WFM", "1": "LSB", "2": "USB", "3": "CW", "4": "FM", "8": "PKTLSB", "C": "PKTUSB"}
@@ -20,6 +21,8 @@ class Rig:
         self.na = {"0": "0", "1": "0"}
         self.ag = {"0": "128", "1": "128"}          # AF GAIN
         self.ptt = "0"
+        self.ptt_cache = "0"       # Hamlib の PTT キャッシュ（1秒）。Hamlib 経由の T / t だけが更新する
+        self.ptt_cache_time = 0.0
         self.vfo_mode = {"0": "USB", "1": "USB"}   # VFO に戻ったときのモード
         self.cat = []          # 無線機に送られた CAT（記録）
         self.vs_history = []
@@ -55,6 +58,9 @@ class Rig:
             return ""
         if c == "TX;":
             return "TX%s;" % ("1" if self.ptt == "1" else "0")
+        if c in ("TX0;", "TX1;"):
+            self.ptt = c[2]            # send_raw 経由では Hamlib のキャッシュは更新されない
+            return ""
         if c in ("FA;", "FB;"):
             return "%s%09d;" % (c[:2], self.freq["0" if c == "FA;" else "1"])
         if c.startswith("AG") and len(c) == 4:
@@ -138,10 +144,13 @@ class H(socketserver.StreamRequestHandler):
                         if args[0] in ("PKTUSB", "PKTLSB"):
                             RIG.na[sd] = "1"
                     elif cmd == "t":
-                        out = [RIG.ptt]
+                        if time.time() - RIG.ptt_cache_time >= 1.0:      # キャッシュ切れ → 無線機を読む
+                            RIG.ptt_cache, RIG.ptt_cache_time = RIG.ptt, time.time()
+                        out = [RIG.ptt_cache]
                     elif cmd == "T":
                         RIG.cat.append("TX%s;" % args[0])
                         RIG.ptt = args[0]
+                        RIG.ptt_cache, RIG.ptt_cache_time = args[0], time.time()
                     elif cmd == "s":
                         out = ["0", "Main"]
                     elif cmd == "V":
