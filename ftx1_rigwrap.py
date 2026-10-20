@@ -5,7 +5,7 @@ WSJT-X などの rigctld クライアントと rigctld（Hamlib）の間に入�
   - F/M の前に、制御先がメモリーチャンネル等なら VFO に戻す
   - DATA-U/DATA-L 設定後にナローが ON になっていたら OFF に戻す
   - （--data-af-zero 指定時）非 DATA モードから DATA-U/DATA-L に切り替えたら AF GAIN を 0 にする
-を行う。設計は handoff/ftx1-rigwrap-design.md を参照。
+を行う。詳細は README.md を参照。
 
 使い方:
   pythonw ftx1_rigwrap.py [--rigctld 127.0.0.1:4534] [--listen 4535:main --listen 4536:sub]
@@ -401,6 +401,7 @@ class Handler(socketserver.BaseRequestHandler):
         self.client_vfo_mode = False   # follow でクライアント自身が set_vfo_opt 1 した
         self.wfm_seen = set()          # W-FM と答えた側（ログを1回だけ出すため）
         self.wlock = threading.Lock()
+        self.fake_ptt = False          # 非操作側で T 1 を無視した間、t に「送信中」と答える（接続ごと）
         self.tag = "%s:%d" % (self.mode, self.server.server_address[1])
         self.up = None
 
@@ -528,12 +529,12 @@ class Handler(socketserver.BaseRequestHandler):
             # 非操作側で無視した送信要求（T 1）のあいだは、PTT の読み出し（t）に「送信中」と返す。
             # 実際には送信していないが、WSJT-X が自分の送信状態と食い違って
             # 送信後の周波数復帰（Fake It）をしなくなるのを防ぐ
-            if n == "get_ptt" and not cmd.prefix and not cmd.args and getattr(self.server, "fake_ptt", False):
+            if n == "get_ptt" and not cmd.prefix and not cmd.args and self.fake_ptt:
                 band = self.ctl.op_band(fresh=True)
                 if band is not None and self.target(band=band) != band:
                     self.to_client("1\n")
                     return None
-                self.server.fake_ptt = False      # 担当側が操作バンドになったら本物の応答に戻す
+                self.fake_ptt = False      # 担当側が操作バンドになったら本物の応答に戻す
             # send_raw で PTT を切り替えた直後は、Hamlib の PTT キャッシュ（1秒）が古いままなので、
             # t は TX; を直接読んで答える（古い「受信中」を返すと WSJT-X が送信状態と食い違う）
             if (n == "get_ptt" and not cmd.prefix and not cmd.args
@@ -699,7 +700,7 @@ class Handler(socketserver.BaseRequestHandler):
             self.to_client("RPRT %d\n" % RIG_EIO)
             return
         if side == band:
-            self.server.fake_ptt = False
+            self.fake_ptt = False
             if cmd.args[:1] in (["0"], ["1"]):
                 self.ptt_raw(cmd, cmd.args[0] == "1")
                 return
@@ -709,9 +710,9 @@ class Handler(socketserver.BaseRequestHandler):
         # 操作バンドでない側の送信要求は実行せずに成功を返す（WSJT-X をエラーにしない）
         if cmd.args[:1] != ["0"]:
             log.info("[%s] 非操作バンド側 (%s) の送信要求を無視: %s", self.tag, side, cmd.raw.strip())
-            self.server.fake_ptt = True
+            self.fake_ptt = True
         else:
-            self.server.fake_ptt = False
+            self.fake_ptt = False
         self.to_client("RPRT 0\n")
 
 
