@@ -73,6 +73,11 @@ class Rig:
         if c.startswith("NA") and len(c) == 5:
             self.na[c[2]] = c[3]
             return ""
+        if c[:2] in ("FA", "FB") and len(c) == 12:      # 周波数の書き込み（メモリー中は無視される）
+            sd = "0" if c[1] == "A" else "1"
+            if self.vm[sd] == "00":
+                self.freq[sd] = int(c[2:11])
+            return ""
         return "?;"
 
 

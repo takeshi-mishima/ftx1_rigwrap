@@ -87,6 +87,11 @@ RIG_EINVAL = -1
 RIG_ENAVAIL = -11
 RIG_ERJCTED = -9
 PTT_CACHE_SEC = 1.5     # Hamlib の PTT キャッシュ（1秒）が古い可能性のある期間
+F_BAND_REUSE_SEC = 1.0  # F の完了からこの間に来た T は、F で読んだ操作バンドを使う（Fake It の F→T 1）
+F_BAND_TTL = 3.0        # その場合に使う操作バンドの古さの上限（F の処理時間を含む）
+FAST_F_MAX_HZ = 5000    # 直近に設定した周波数との差がこれ未満の F だけ send_raw で送る（Fake It のシフト）
+FAST_F_KNOWN_SEC = 60.0  # 直近に設定した周波数を「現在の周波数」とみなす期間（これを過ぎたら従来の経路）
+FREQ_RAW_CACHE_SEC = 1.5  # send_raw で周波数を変えた直後、f をこちらで答える期間（Hamlib のキャッシュが古い間）
 
 log = logging.getLogger("ftx1_rigwrap")
 
@@ -152,6 +157,9 @@ class Control:
         self._band_time = 0.0
         self.pending = {}       # side -> (モード名, 時刻, 保留時点で DATA 系だったか)：メモリー中に保留した M
         self.af_zero_data = False   # --data-af-zero：非 DATA → DATA-U/L で AF GAIN を 0 にする
+        self.fast_f = True          # 同じバンド内の小さな F を send_raw で送る（--no-fast-f で無効）
+        self.freq_known = {}        # side -> (周波数 Hz, 時刻)：ラッパーが最後に設定した周波数
+        self.freq_raw = None        # (side, 周波数 Hz, 時刻)：直近に send_raw で設定した周波数
         self.ptt_raw_time = 0.0     # 直近に PTT を send_raw で切り替えた時刻（Hamlib の PTT キャッシュが古い間、t を直接読む）
 
     # --- 低レベル
@@ -246,7 +254,8 @@ class Control:
             self.ptt_raw_time = time.monotonic()
         if ans is None:
             return False, None
-        return (ans != "TX0;") if on else (ans == "TX0;"), ans
+        # ON の成功は TX1;（CAT送信）/ TX2;（本体側の送信）のみ。?; などは失敗とする
+        return (ans in ("TX1;", "TX2;")) if on else (ans == "TX0;"), ans
 
     def get_ptt_raw(self):
         """TX; を直接読む。戻り値："1" / "0" / None（読めない）"""
@@ -358,6 +367,22 @@ class Control:
             return None
         return md[3] == "0"
 
+    def set_freq_raw(self, side, hz):
+        """side の周波数を send_raw（FA/FB の書き込み＋読み戻し、1往復）で設定する。
+        読み戻した値が一致したら True。Hamlib は知らないので、直後の f はこちらで答える（freq_raw）"""
+        L = "A" if side == "Main" else "B"
+        with self.lock:
+            ans = self.raw("F%s%09d;F%s;" % (L, hz, L))
+            if ans == "F%s%09d;" % (L, hz):
+                now = time.monotonic()
+                self.freq_known[side] = (hz, now)
+                self.freq_raw = (side, hz, now)
+                return True
+            self.freq_known.pop(side, None)
+            self.freq_raw = None
+            log.warning("FA/FB の設定を確認できません (%s %d -> %r)", side, hz, ans)
+            return False
+
     def af_zero(self, side):
         """AF GAIN を 0 にして読み戻して確認する"""
         d = SIDE_DIGIT[side]
@@ -401,6 +426,7 @@ class Handler(socketserver.BaseRequestHandler):
         self.client_vfo_mode = False   # follow でクライアント自身が set_vfo_opt 1 した
         self.wfm_seen = set()          # W-FM と答えた側（ログを1回だけ出すため）
         self.wlock = threading.Lock()
+        self.f_done = -1e9             # 直近の F が完了した時刻
         self.fake_ptt = False          # 非操作側で T 1 を無視した間、t に「送信中」と答える（接続ごと）
         self.tag = "%s:%d" % (self.mode, self.server.server_address[1])
         self.up = None
@@ -500,6 +526,8 @@ class Handler(socketserver.BaseRequestHandler):
 
         if n in ("set_freq", "set_mode"):
             self.hook_freq_mode(cmd)
+            if n == "set_freq":
+                self.f_done = time.monotonic()
             return None
 
         # chk_vfo はラッパーが答える。rigctld は「直前にコマンドを処理した別の接続」の
@@ -513,6 +541,13 @@ class Handler(socketserver.BaseRequestHandler):
             v = 1 if (not self.routed and self.client_vfo_mode) else 0
             self.to_client(("ChkVFO: %d\n" if cmd.prefix else "%d\n") % v)
             return None
+
+        # send_raw で周波数を変えた直後は、Hamlib の周波数キャッシュが古いままなので、f はこちらで答える
+        if n == "get_freq" and not cmd.prefix and not cmd.args and self.ctl.freq_raw is not None:
+            side, hz, t0 = self.ctl.freq_raw
+            if time.monotonic() - t0 < FREQ_RAW_CACHE_SEC and self.target(fresh=False) == side:
+                self.to_client("%d\n" % hz)
+                return None
 
         # m：対象側が W-FM のときは rigctld に渡さない（hook_get_mode）
         if n == "get_mode" and self.hook_get_mode(cmd):
@@ -593,12 +628,44 @@ class Handler(socketserver.BaseRequestHandler):
             self.to_client("WFM\n0\n")
         return True
 
+    # --- F の速い経路
+    def fast_freq(self, cmd, args):
+        """同じバンド内の小さな F（Fake It のシフトと戻し）を send_raw で設定する（VM と FA/FB の2往復）。
+        条件：プレーンな F、制御先が VFO、直近にラッパーが設定した周波数との差が FAST_F_MAX_HZ 未満。
+        バンドが変わる F・メモリー中・確認できなかったときは False を返し、従来の経路に任せる"""
+        if not (self.ctl.fast_f and cmd.name == "set_freq" and len(args) == 1
+                and not cmd.prefix and not self.client_vfo_mode):
+            return False
+        try:
+            want = int(round(float(args[0])))
+        except ValueError:
+            return False
+        if not 0 < want < 10 ** 9:
+            return False
+        side = self.target(fresh=True)
+        known = self.ctl.freq_known.get(side)
+        if (side is None or known is None or time.monotonic() - known[1] > FAST_F_KNOWN_SEC
+                or abs(want - known[0]) >= FAST_F_MAX_HZ):
+            return False
+        d = SIDE_DIGIT[side]
+        t0 = time.monotonic()
+        if self.ctl.raw("VM%s;" % d) != "VM%s00;" % d:
+            return False
+        if not self.ctl.set_freq_raw(side, want):
+            return False
+        log.debug("[%s] %s: F %d を send_raw で設定 %.0fms", self.tag, side, want,
+                  (time.monotonic() - t0) * 1000)
+        self.to_client("RPRT 0\n")
+        return True
+
     # --- F / M
     def hook_freq_mode(self, cmd):
         args = list(cmd.args)
         explicit = None
         if self.client_vfo_mode and args:          # follow でクライアントが VFO を付けてきた
             explicit = args.pop(0)
+        if self.fast_freq(cmd, args):
+            return
         band = self.ctl.op_band(fresh=True)
         if explicit in ("Main", "Sub"):
             side = explicit
@@ -657,6 +724,8 @@ class Handler(socketserver.BaseRequestHandler):
         if to_data and self.ctl.af_zero_data:
             af_zero = self.ctl.is_data_mode(side) is False
 
+        if cmd.name == "set_freq":
+            self.ctl.freq_raw = None
         lines, rc = self.ctl.command(cmd.build(vfo=side, args=args, prefix="+"))
         if rc == 0 and to_data:
             ok2, changed = self.ctl.narrow_off(side)
@@ -667,6 +736,10 @@ class Handler(socketserver.BaseRequestHandler):
                 log.info("[%s] %s: 非 DATA → %s のため%s", self.tag, side, args[0],
                          self.ctl.af_zero_note(side))
         if rc == 0 and cmd.name == "set_freq":
+            try:
+                self.ctl.freq_known[side] = (int(round(float(args[0]))), time.monotonic())
+            except (ValueError, IndexError):
+                self.ctl.freq_known.pop(side, None)
             ok2, changed = self.ctl.narrow_off_if_data(side)
             if changed:
                 log.info("[%s] %s: 周波数変更後の DATA ナローを OFF (%s)", self.tag, side,
@@ -694,7 +767,9 @@ class Handler(socketserver.BaseRequestHandler):
         self.reply_rc(cmd, rc, ["set_ptt: %d" % (1 if on else 0), "RPRT %d" % rc])
 
     def hook_ptt(self, cmd):
-        band = self.ctl.op_band(fresh=True)
+        # Fake It の F の直後は、F で読んだ操作バンドを使う（VS; の往復を1回省く）
+        after_f = time.monotonic() - self.f_done < F_BAND_REUSE_SEC
+        band = self.ctl.op_band(fresh=not after_f, ttl=F_BAND_TTL)
         side = self.target(band=band)
         if side is None or band is None:
             self.to_client("RPRT %d\n" % RIG_EIO)
@@ -814,6 +889,8 @@ def main(argv=None):
     ap.add_argument("--data-af-zero", action="store_true",
                     help="非 DATA モードから DATA-U/DATA-L に切り替えたとき、その側の AF GAIN を 0 にする"
                          "（DATA の受信音をスピーカーから出さない。元には戻さない）")
+    ap.add_argument("--no-fast-f", action="store_true",
+                    help="同じバンド内の小さな F（Fake It のシフト）を send_raw で送る速い経路を使わない")
     ap.add_argument("--debug", action="store_true", help="受信したコマンドもすべてログに出す")
     a = ap.parse_args(argv)
     listens = a.listen or [(4535, "main"), (4536, "sub")]
@@ -823,6 +900,7 @@ def main(argv=None):
     host, port = parse_hostport(a.rigctld)
     control = Control(host, port)
     control.af_zero_data = a.data_af_zero
+    control.fast_f = not a.no_fast_f
     log.info("ftx1_rigwrap %s 起動 rigctld=%s:%d%s", VERSION, host, port,
              " data-af-zero" if a.data_af_zero else "")
 

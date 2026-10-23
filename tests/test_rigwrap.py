@@ -59,6 +59,7 @@ def main():
     c1, c2, c3 = Client(P_FOLLOW), Client(P_OPP), Client(P_MAIN)
     import gc
     _CTL.append(next(o for o in gc.get_objects() if isinstance(o, ftx1_rigwrap.Control)))
+    _CTL[0].fast_f = False      # F の速い経路は専用のテストで確認する（ほかのテストは従来の経路）
 
     # --- 起動時ハンドシェイク
     c2.q("f")      # rigctld 側で直前の接続を vfo_opt=1 にする（Hamlib の chk_vfo の不具合の再現）
@@ -291,6 +292,53 @@ def main():
     check("main m（MAIN が W-FM）→ WFM / 0", c3.q("m", 2) == ["WFM", "0"])
     check("W-FM の m が rigctld に届いていない（MAIN も）", mock_rigctld.WFM_M_HITS[0] == 0)
     RIG.mode["0"] = "USB"
+
+    # --- F の速い経路（同じバンド内の小さな F を send_raw で設定）
+    ctl = _CTL[0]
+    ctl.fast_f = True
+    time.sleep(0.6)
+    RIG.vs, RIG.vm = "0", {"0": "00", "1": "00"}
+    check("最初の F は従来の経路（周波数を記録）", c3.q("F 14075000") == ["RPRT 0"] and RIG.freq["0"] == 14075000
+          and ctl.freq_known["Main"][0] == 14075000)
+    RIG.cat.clear()
+    check("小さな F（+500Hz）は速い経路", c3.q("F 14075500") == ["RPRT 0"] and RIG.freq["0"] == 14075500)
+    check("速い経路は VM と FA の書き込み・読み戻しだけ（VS; を読まない）",
+          RIG.cat == ["VM0;", "FA014075500;", "FA;"])
+    RIG.freq["0"] = 1                      # Hamlib のキャッシュが古い状態を模す
+    check("直後の f はこちらで答える（古いキャッシュを返さない）", c3.q("f") == ["14075500"])
+    time.sleep(1.6)
+    check("期間が過ぎれば f は rigctld に渡す", c3.q("f") == ["1"])
+    RIG.freq["0"] = 14075500
+    check("戻しの F（-500Hz）も速い経路", c3.q("F 14075000") == ["RPRT 0"] and RIG.freq["0"] == 14075000)
+    RIG.cat.clear()
+    check("バンドが変わる F は従来の経路（VS; を読む）", c3.q("F 7074000") == ["RPRT 0"]
+          and RIG.freq["0"] == 7074000 and "VS;" in RIG.cat)
+    check("従来の経路の F で速い経路の f 応答は消える", ctl.freq_raw is None)
+    ctl.freq_known["Main"] = (7074000, time.monotonic() - 100)
+    RIG.cat.clear()
+    check("記録が古ければ小さな F も従来の経路", c3.q("F 7074500") == ["RPRT 0"]
+          and RIG.freq["0"] == 7074500 and "VS;" in RIG.cat)
+    RIG.vm["0"] = "11"
+    RIG.cat.clear()
+    check("メモリー中は速い経路を使わない（メモリーのまま・周波数は変えない）", c3.q("F 7074800") == ["RPRT 0"]
+          and RIG.vm["0"] == "11" and RIG.freq["0"] == 7074500)
+    RIG.vm["0"] = "00"
+    ctl.fast_f = False
+    RIG.cat.clear()
+    check("--no-fast-f（無効）では従来の経路", c3.q("F 7074600") == ["RPRT 0"] and "VS;" in RIG.cat)
+    ctl.fast_f = False
+
+    # --- F の直後の T は操作バンド（VS;）を読み直さない（Fake It の F → T 1）
+    time.sleep(0.6)
+    RIG.vs, RIG.vm = "0", {"0": "00", "1": "00"}
+    RIG.cat.clear()
+    check("main F", c3.q("F 14075500") == ["RPRT 0"])
+    check("main T 1 は F の直後（実行される）", c3.q("T 1") == ["RPRT 0"] and RIG.ptt == "1")
+    check("F → T 1 で VS; の読み出しは F の1回だけ", RIG.cat.count("VS;") == 1)
+    time.sleep(1.1)
+    RIG.cat.clear()
+    check("main T 0（F から1秒以上後）", c3.q("T 0") == ["RPRT 0"] and RIG.ptt == "0")
+    check("F から時間が経てば VS; を読み直す", RIG.cat.count("VS;") == 1)
 
     print(open(log, encoding="utf-8").read())
     print("FAILS:", fails)
