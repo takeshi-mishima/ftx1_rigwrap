@@ -1,4 +1,4 @@
-# ftx1_rigwrap Ver.2.4
+# ftx1_rigwrap Ver.2.5
 
 八重洲無線 FTX-1 用の rigctld（Hamlib）プロキシです。WSJT-X などの rigctld クライアントと rigctld の間に入り、CAT 制御の向き先（MAIN / SUB）をポートごとに振り分けます。WSJT-X を2つ起動してデュアルバンド受信をするとき、#1 を MAIN、#2 を SUB の担当に固定できます（既定）。
 
@@ -204,6 +204,7 @@ python tests\test_rigwrap.py
 
 ## 変更履歴
 
+- Ver.2.5（2026-10-23）同じバンド内の小さな `F`（WSJT-X の Split Operation = Fake It のシフトと戻し）を、Hamlib 経由（無線機との往復が5〜6回）ではなく `send_raw`（`VM` の確認と `FA`／`FB` の書き込み＋読み戻しの2往復）で設定するようにした。`--no-fast-f` で無効にできる。`F` の直後の `T 1` は、`F` で読んだ操作バンドを使い、`VS;` の読み出しを1回省く。PTT ON の成功判定を `TX1;` / `TX2;` のみにした
 - Ver.2.4（2026-10-19）routed の `T 0` / `T 1` を Hamlib の `set_ptt` ではなく `send_raw`（`TX1;TX;` / `TX0;TX;`）で実行するようにした。PTT の応答までの時間が、送信ONで約185ms → 約65ms、送信OFFで約250ms → 約65ms に短縮される。切替直後の `t` は Hamlib のキャッシュではなく `TX;` を直接読んで答える。非操作側で無視した `T 1` のあいだ `t` に「送信中」と答える状態（fake_ptt）を接続ごとの管理にし、切断すると解除されるようにした
 - Ver.2.3（2026-10-16）W-FM の側へのモード読み出し（`m`）を rigctld に渡さず、ラッパーが `WFM` と答えるようにした。Hamlib が W-FM を解釈できずに -8 を返し、rigctld が rig を閉じて開き直しを繰り返したあと終了する問題を修正
 - Ver.2.2（2026-10-13）routed で、無視した `T 1` のあいだ、PTT の読み出し（`t`）に「送信中」を返す。操作バンドでない側の WSJT-X（Split Operation = Fake It）が送信しようとしたとき、周波数が元に戻らずずれる問題を修正。`--debug` で、クライアントへ返した内容も記録する

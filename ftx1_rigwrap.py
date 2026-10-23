@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "2.4"
+VERSION = "2.5"
 
 MODES = ("follow", "opposite", "main", "sub")
 SIDE_DIGIT = {"Main": "0", "Sub": "1"}
