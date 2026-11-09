@@ -4,7 +4,8 @@ import threading
 import time
 
 
-CODE = {"0": "WFM", "1": "LSB", "2": "USB", "3": "CW", "4": "FM", "8": "PKTLSB", "C": "PKTUSB"}
+CODE = {"0": "WFM", "1": "LSB", "2": "USB", "3": "CW", "4": "FM", "5": "AM", "7": "CWR", "8": "PKTLSB",
+        "A": "PKTFM", "B": "FMN", "C": "PKTUSB", "D": "AMN"}
 NAME = {v: k for k, v in CODE.items()}
 
 
@@ -85,6 +86,8 @@ RIG = Rig()
 
 # W-FM の側への m が rigctld に届いた回数（実機の Hamlib は -8 を返して rig を閉じる）
 WFM_M_HITS = [0]
+# rigctld に届いた m（get_mode）の回数（Ver.2.6 以降、ラッパーは m を rigctld に渡さない）
+M_HITS = [0]
 
 # rigctld の \chk_vfo は、直前にコマンドを処理した接続の vfo_opt を返す（Hamlib の実際の動作）
 LAST_VFO_OPT = [False]
@@ -138,6 +141,7 @@ class H(socketserver.StreamRequestHandler):
                             RIG.freq[sd] = int(float(args[0]))
                         # メモリー中は拒否されるが RPRT 0（実機と同じ）
                     elif cmd == "m":
+                        M_HITS[0] += 1
                         if RIG.mode[sd] == "WFM":
                             WFM_M_HITS[0] += 1
                             rc = -8

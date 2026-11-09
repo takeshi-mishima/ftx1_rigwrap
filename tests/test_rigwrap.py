@@ -72,7 +72,7 @@ def main():
     # --- 読み出しの振り分け（VS0: 操作=MAIN）
     check("follow f = MAIN", c1.q("f") == ["14074000"])
     check("opposite f = SUB", c2.q("f") == ["7074000"])
-    check("opposite m = SUB", c2.q("m", 2) == ["LSB", "3000"])
+    check("opposite m = SUB", c2.q("m", 2) == ["LSB", "0"])
     check("main f = MAIN", c3.q("f") == ["14074000"])
     check("opposite v はそのまま", c2.q("v") == ["Main"])
 
@@ -279,19 +279,31 @@ def main():
     time.sleep(0.6)  # 操作バンドのキャッシュ切れ
     mock_rigctld.WFM_M_HITS[0] = 0
     check("opposite m（SUB が W-FM）→ WFM / 0", c2.q("m", 2) == ["WFM", "0"])
-    check("main m（MAIN は W-FM でない）は rigctld の答え", c3.q("m", 2) == ["USB", "3000"])
-    check("follow m（操作バンド MAIN は W-FM でない）は rigctld の答え", c1.q("m", 2) == ["USB", "3000"])
+    check("main m（MAIN は W-FM でない）はラッパーが MD で答える", c3.q("m", 2) == ["USB", "0"])
+    check("follow m（操作バンド MAIN は W-FM でない）はラッパーが MD で答える", c1.q("m", 2) == ["USB", "0"])
     check("follow vfo_opt 後 m Sub（W-FM）→ WFM / 0", c4.q("m Sub", 2) == ["WFM", "0"])
     check("+m（W-FM）→ RPRT -11（rigctld に渡さない）", c2.q("+m") == ["RPRT -11"])
     check("W-FM の m が rigctld に届いていない", mock_rigctld.WFM_M_HITS[0] == 0)
     RIG.mode["1"] = "LSB"
-    check("W-FM でなくなれば今までどおり", c2.q("m", 2) == ["LSB", "3000"])
+    check("W-FM でなくなれば今までどおり", c2.q("m", 2) == ["LSB", "0"])
     RIG.mode["0"] = "WFM"
     time.sleep(0.6)
     check("follow m（操作バンド MAIN が W-FM）→ WFM / 0", c1.q("m", 2) == ["WFM", "0"])
     check("main m（MAIN が W-FM）→ WFM / 0", c3.q("m", 2) == ["WFM", "0"])
     check("W-FM の m が rigctld に届いていない（MAIN も）", mock_rigctld.WFM_M_HITS[0] == 0)
     RIG.mode["0"] = "USB"
+
+    # --- Ver.2.6：m は常にラッパーが MD で答え、rigctld（Hamlib の get_mode）には一切渡さない
+    mock_rigctld.M_HITS[0] = 0
+    time.sleep(0.6)
+    for code, name in (("1", "LSB"), ("2", "USB"), ("3", "CW"), ("4", "FM"), ("5", "AM"), ("7", "CWR"),
+                       ("8", "PKTLSB"), ("A", "PKTFM"), ("B", "FMN"), ("C", "PKTUSB"), ("D", "AMN")):
+        RIG.mode["1"] = mock_rigctld.CODE[code]
+        check("opposite m（SUB = MD %s）→ %s / 0" % (code, name), c2.q("m", 2) == [name, "0"])
+    RIG.mode["1"] = "CW"
+    check("+m（W-FM でない）→ 拡張応答", c2.q("+m", 4) == ["get_mode:", "Mode: CW", "Passband: 0", "RPRT 0"])
+    check("m が rigctld に1回も届いていない（Ver.2.6）", mock_rigctld.M_HITS[0] == 0)
+    RIG.mode["1"] = "USB"
 
     # --- F の速い経路（同じバンド内の小さな F を send_raw で設定）
     ctl = _CTL[0]

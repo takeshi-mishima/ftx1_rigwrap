@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-VERSION = "2.5"
+VERSION = "2.6"
 
 MODES = ("follow", "opposite", "main", "sub")
 SIDE_DIGIT = {"Main": "0", "Sub": "1"}
@@ -85,6 +85,10 @@ RIG_EIO = -6
 RIG_ETIMEOUT = -5
 RIG_EINVAL = -1
 RIG_ENAVAIL = -11
+# FTX-1 の CAT「MD」のモード番号 → Hamlib（rigctld）のモード名（Hamlib の newcat と同じ対応。0 は W-FM）
+MD_NAME = {"0": "WFM", "1": "LSB", "2": "USB", "3": "CW", "4": "FM", "5": "AM", "6": "RTTY",
+           "7": "CWR", "8": "PKTLSB", "9": "RTTYR", "A": "PKTFM", "B": "FMN", "C": "PKTUSB",
+           "D": "AMN", "E": "PSK", "F": "PKTFMN", "H": "C4FM", "I": "C4FM"}
 RIG_ERJCTED = -9
 PTT_CACHE_SEC = 1.5     # Hamlib の PTT キャッシュ（1秒）が古い可能性のある期間
 F_BAND_REUSE_SEC = 1.0  # F の完了からこの間に来た T は、F で読んだ操作バンドを使う（Fake It の F→T 1）
@@ -359,13 +363,13 @@ class Control:
             return None
         return md[3] in ("8", "C")
 
-    def is_wfm(self, side):
-        """side のモードが W-FM（MD の値が 0）なら True、そうでなければ False、読めなければ None"""
+    def mode_code(self, side):
+        """side のモード番号（MD の1文字。W-FM は "0"）、読めなければ None"""
         d = SIDE_DIGIT[side]
         md = self.raw("MD%s;" % d)
         if not (md and len(md) == 5 and md.startswith("MD" + d)):
             return None
-        return md[3] == "0"
+        return md[3]
 
     def set_freq_raw(self, side, hz):
         """side の周波数を send_raw（FA/FB の書き込み＋読み戻し、1往復）で設定する。
@@ -549,7 +553,7 @@ class Handler(socketserver.BaseRequestHandler):
                 self.to_client("%d\n" % hz)
                 return None
 
-        # m：対象側が W-FM のときは rigctld に渡さない（hook_get_mode）
+        # m：rigctld に渡さず、ラッパーが MD で読んで答える（hook_get_mode）
         if n == "get_mode" and self.hook_get_mode(cmd):
             return None
 
@@ -604,10 +608,12 @@ class Handler(socketserver.BaseRequestHandler):
 
     # --- m
     def hook_get_mode(self, cmd):
-        """m：対象側が W-FM（MD の値が 0）のときは rigctld に渡さず、ラッパーが WFM と答える。
+        """m：rigctld に渡さず、ラッパーが MD{側}; を直接読んでモード名を答える。
         FTX-1 は W-FM を MD{d}0; と返し、Hamlib はこれを解釈できず -8 を返して rig を閉じる。
         毎秒ポーリングするクライアントが複数いると、閉じて開き直す間に競合して rigctld が終了する。
-        戻り値：応答済みなら True"""
+        「W-FM でないことを確認してから m を渡す」方式では、確認と rigctld の読み出しの間（約0.1秒）に
+        W-FM へ変わると防げないため、m は常にここで答える。
+        戻り値：応答済みなら True（モード番号が読めなかったときだけ False で、rigctld に任せる）"""
         if self.routed:
             side = self.target(fresh=False)
         elif self.client_vfo_mode and cmd.args:
@@ -616,16 +622,22 @@ class Handler(socketserver.BaseRequestHandler):
             side = self.ctl.op_band()
         if side not in SIDE_DIGIT:
             return False
-        if not self.ctl.is_wfm(side):
-            self.wfm_seen.discard(side)
+        code = self.ctl.mode_code(side)
+        if code is None:
             return False
-        if side not in self.wfm_seen:
-            self.wfm_seen.add(side)
-            log.info("[%s] %s: W-FM のため m を rigctld に渡さず WFM と答える", self.tag, side)
-        if cmd.prefix:
-            self.to_client("RPRT %d\n" % RIG_ENAVAIL)
+        name = MD_NAME.get(code)
+        if code == "0":
+            if side not in self.wfm_seen:
+                self.wfm_seen.add(side)
+                log.info("[%s] %s: W-FM のため m に WFM と答える", self.tag, side)
         else:
-            self.to_client("WFM\n0\n")
+            self.wfm_seen.discard(side)
+        if name is None or (cmd.prefix and (code == "0" or cmd.prefix != "+")):
+            self.to_client("RPRT %d\n" % RIG_ENAVAIL)
+        elif cmd.prefix:
+            self.to_client("get_mode:\nMode: %s\nPassband: 0\nRPRT 0\n" % name)
+        else:
+            self.to_client("%s\n0\n" % name)
         return True
 
     # --- F の速い経路
